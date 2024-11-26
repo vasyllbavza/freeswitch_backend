@@ -1,5 +1,4 @@
 const express = require('express');
-const multer = require('multer');
 const axios = require('axios');
 const dotenv = require('dotenv');
 const fs = require('fs-extra');
@@ -8,31 +7,15 @@ const path = require('path');
 dotenv.config();
 
 const app = express();
-const port = 7001;
-
-const upload = multer({ dest: 'uploads/' });
+const port = process.env.PORT || 7001;
 
 app.use(express.json());
 
-// Asynchronous function to transcribe audio using Deepgram API
-async function transcribeAudio(filePath) {
-  try {
-    const audioData = await fs.readFile(filePath);
-    const response = await axios.post('https://api.deepgram.com/v1/listen', audioData, {
-      headers: {
-        'Content-Type': 'audio/wav',
-        'Authorization': `Token ${process.env.DEEPGRAM_API_KEY}`
-      }
-    });
-    return response.data.results.channels[0].alternatives[0].transcript;
-  } catch (error) {
-    console.error('Error transcribing audio:', error);
-    return '';
-  }
-}
+// Store states for each call
+const callStates = {};
 
-// Asynchronous function to generate a response using OpenAI API
-async function generateResponse(callUuid, text, agentId) {
+// Function to generate a response using OpenAI API
+async function generateResponse(callId, text, agentId) {
   try {
     const response = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: 'gpt-4o',
@@ -47,31 +30,17 @@ async function generateResponse(callUuid, text, agentId) {
     });
     return response.data.choices[0].message.content;
   } catch (error) {
-    console.error('Error generating response:', error);
+    console.error(`Error generating response for callId ${callId}:`, error);
     return '';
   }
 }
 
-// Asynchronous function to convert text to speech using Google's TTS API
-async function textToSpeech(text) {
-  try {
-    const response = await axios.post(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${process.env.GOOGLE_TTS_API_KEY}`, {
-      input: { text },
-      voice: { languageCode: 'en-US', name: 'en-US-Wavenet-A', ssmlGender: 'MALE' },
-      audioConfig: { audioEncoding: 'LINEAR16' }
-    });
-    return Buffer.from(response.data.audioContent, 'base64');
-  } catch (error) {
-    console.error('Error in text-to-speech:', error);
-    return null;
-  }
-}
-
-async function textToSpeech2(text) {
+// Function to convert text to speech using ElevenLabs TTS API
+async function textToSpeechWithElevenLabs(callId, text) {
   try {
     const response = await axios.post('https://api.elevenlabs.io/v1/text-to-speech', {
       text: text,
-      voice: 'en_us_male',  // Replace with the voice options provided by ElevenLabs
+      voice: 'en_us_male',  // Replace with the correct voice options provided by ElevenLabs
       speed: 1.0  // Adjust speed as needed
     }, {
       headers: {
@@ -82,49 +51,62 @@ async function textToSpeech2(text) {
     });
     return Buffer.from(response.data);  // Return the audio buffer directly
   } catch (error) {
-    console.error('Error in text-to-speech with ElevenLabs:', error);
+    console.error(`Error in text-to-speech with ElevenLabs for callId ${callId}:`, error);
     return null;
   }
 }
-// Endpoint to handle audio processing
-app.post('/vocodeApi', upload.single('file'), async (req, res) => {
-  const { callUuid, callTo } = req.body;
-  const filePath = req.file.path;
+
+// Endpoint to process text requests
+app.post('/vocodeApi', async (req, res) => {
+  const { callId, inputText, callTo } = req.body;
+  if (!inputText) {
+    return res.status(400).send({ error: 'Input text is empty' });
+  }
+
+  // Initialize call state
+  callStates[callId] = { status: 'processing', error: null };
+
   try {
-    const transcript = await transcribeAudio(filePath);
-    console.log("\n------------------------------------Input------------------------------------\n", transcript);
+    console.log(`Processing callId ${callId} with input:`, inputText);
 
-    if (!transcript && filePath) {
-      console.error("Transcript is empty or file path is empty, skipping text-to-speech conversion.");
-      return res.status(400).send({ error: 'Transcript is empty' });
-    }
+    const responseText = await generateResponse(callId, inputText, callTo);
+    console.log(`Generated response for callId ${callId}:`, responseText);
 
-    const responseText = await generateResponse(callUuid, transcript, callTo);
-    console.log("------------------------------------Output----------------------------------\n", responseText, "\n----------------------------------------------------------------------------");
-
-    const audioResponse = await textToSpeech2(responseText);
+    const audioResponse = await textToSpeechWithElevenLabs(callId, responseText);
     if (!audioResponse) {
-      console.error("Audio response is empty, skipping save.");
-      return res.status(500).send({ error: 'Failed to generate audio response' });
+      throw new Error('Failed to generate audio response');
     }
 
     const responseDir = path.join(__dirname, 'recordings');
     await fs.ensureDir(responseDir);
 
-    const responseFilePath = path.join(responseDir, `${callUuid}_response.wav`);
+    const responseFilePath = path.join(responseDir, `${callId}_response.wav`);
     await fs.writeFile(responseFilePath, audioResponse);
 
     // Set permissions to read by everyone
     fs.chmodSync(responseFilePath, 0o777);
 
-    res.send({ message: 'Call details received, processing completed.', path: responseFilePath });
+    // Update call state
+    callStates[callId] = { status: 'completed', path: responseFilePath };
+
+    res.send({ message: 'Text processed and audio generated.', path: responseFilePath });
   } catch (error) {
-    console.error('Error processing request:', error);
+    console.error(`Error processing callId ${callId}:`, error);
+    callStates[callId] = { status: 'error', error: error.message };
     res.status(500).send({ error: 'Internal server error' });
-  } finally {
-    // Clean up uploaded file
-    fs.unlinkSync(filePath);
   }
+});
+
+// Endpoint to check the status of a call
+app.get('/callStatus/:callId', (req, res) => {
+  const { callId } = req.params;
+  const callState = callStates[callId];
+
+  if (!callState) {
+    return res.status(404).send({ error: 'Call ID not found' });
+  }
+
+  res.send(callState);
 });
 
 app.listen(port, () => {

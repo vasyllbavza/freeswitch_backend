@@ -11,10 +11,16 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "axios": "^1.7.7",
+    "@deepgram/sdk": "^3.9.0",
+    "@google-cloud/speech": "^6.7.0",
+    "@google-cloud/text-to-speech": "^5.6.0",
+    "@pinecone-database/pinecone": "^4.0.0",
+    "axios": "^1.7.8",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
     "fs-extra": "^11.2.0",
-    "multer": "^1.4.5-lts.1"
+    "multer": "^1.4.5-lts.1",
+    "openai": "^4.73.1",
+    "ws": "^8.18.0"
   }
 }
